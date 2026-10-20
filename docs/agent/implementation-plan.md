@@ -1,17 +1,23 @@
 # Поэтапный план реализации lab-workbench
 
-Статус: **план после архитектурного ревью, не разрешение начать реализацию**.
+Статус: **общая архитектура одобрена, поправки ревью внесены; текущее задание
+только на документы, реализация не начата**.
 Основание: [architecture-proposal.md](architecture-proposal.md).
 
-## 0. Зафиксировать решения ревью
+## 0. Решения ревью зафиксированы
 
-Подтвердить один Runtime/одно окно, отдельные scope, документ без scripts,
-внешний API без Runtime gateway, bootstrap с domain fences, отсутствие persistent
-GUI state и автоматического повторения mutations. Разобрать
+Сохранены один Runtime/одно окно, отдельные scope, документ без scripts,
+внешний API без Runtime gateway, корректный bootstrap с domain fences,
+ограниченные очереди, RAM-only GUI state и запрет повторения неопределённых mutations.
+
+Приняты порт UI API `7430`, ранний `document.replace`, отложенный typed patch,
+дискретный `output_observation` и Apply без дополнительного modal для обычной
+уставки. Длительный ручной режим с видимым автопродлением — отдельное предложение
+для обсуждения, не утверждённая реализация. Оставшиеся вопросы:
 [open-questions.md](open-questions.md).
 
-Результат: короткие изменения архитектурного документа по принятым решениям.
-Не начинать сразу «всю систему» после первого обсуждённого пункта.
+Следующие этапы описывают будущую работу по отдельному заданию. Сейчас не создавать
+исходники и Cargo.toml.
 
 ## 1. Пустое штатное окно
 
@@ -24,27 +30,40 @@ lockfile и MSRV. `eframe::run_native`, одна системная строка
 repaint при свёрнутом окне. Ни Runtime child process, ни GPU host helpers.
 `CARGO_TARGET_DIR=D:\lab-workbench-sandbox\cargo-target`.
 
-## 2. Read-only подключение и discovery
+## 2. Минимальный внешний UI API и document.replace
 
-Собственные Application wire DTO, bounded framing, hello и capabilities.
-Прочитать discovery pages последовательно; показать instruments/signals,
-descriptor и recording_status. Сформировать typed ObservedRuntime и состояния
-Disconnected/Connecting/Synchronizing/Live. Пока не включать управление.
+Рано ввести TCP/NDJSON listener `127.0.0.1:7430`: hello/get/replace/status,
+строгие DTO, стабильные IDs, instance ID и CAS revision. Runtime TCP `7420`
+и WebSocket `7421` не занимать. Первые документы содержат график с signal binding;
+пока Runtime не подключён, показывать unresolved, без выдуманных значений.
+Документ устанавливается атомарно главным потоком и сохраняется только в RAM.
 
-Проверка: тестовый socket делит JSON на части, посылает CRLF, malformed/oversized
-frame, response error. Workbench не зависает и не импортирует Runtime crates.
-На реальном Runtime проверить обе композиции: Recorder absent и enabled.
+Проверка: Clojure через replace задаёт график/кривую, меняет подпись и отключается —
+конфигурация остаётся. Проверить conflict, невалидный/oversized document, partial
+NDJSON/CRLF и старый instance. API работает при свёрнутом окне. `document.patch`
+не объявляется в hello.operations и возвращает `unsupported_operation`.
+Нет отдельного этапа полного patch API перед живыми данными.
 
-## 3. Один живой график с корректным bootstrap
+## 3. Первый вертикальный срез: Clojure → документ → Runtime → живой график
 
-Реализовать subscription от hello cursor, D/M fences, контрольный F, bounded
-staging и установку снимков; добавить один signal source и сегментированный
-ограниченный buffer. Температура виртуальной печи обновляется непосредственно
-Runtime events. Штатные zoom/drag/follow latest.
+Собственные Application wire DTO, bounded framing, hello/capabilities, discovery
+со всеми страницами и describe. Реализовать subscription от hello cursor,
+D/M fences (P при необходимости), контрольный F, последовательные frozen families,
+bounded staging и установку снимков. Добавить ObservedRuntime и состояния
+Disconnected/Connecting/Synchronizing/Live, один сегментированный ограниченный
+signal buffer. Температура виртуальной печи приходит непосредственно из Runtime.
 
-Проверка: непрерывные точки без polling latest на каждый sample; тест гонки
-D=100 → Reference event 101 → M=105; timeout/gap не оставляет Live.
-Последовательное чтение frozen families не уничтожает свои continuation tokens.
+Критерий готовности: Clojure подключается к `7430`, делает `document.replace`
+из раздела 4.3 архитектуры; Workbench сам подключается к Runtime и показывает
+живую температуру через `egui_plot`. Clojure не пересылает измерения; после его
+отключения график продолжает обновляться. Пример не зависит от patch и управлений.
+
+Проверки: partial/malformed Runtime frames, ответы вперемежку с events, гонка
+D=100 → Reference event 101 → M=105; timeout/gap немедленно снимает Live.
+Страницы разных frozen families не уничтожают друг друга. Штатные zoom/drag/follow
+latest, конечные memory/queue budgets, никаких Runtime crates как dependencies.
+После успешного Clojure transcript можно отдельно планировать typed patch,
+но он не становится обязательным для дальнейших этапов.
 
 ## 4. Reconnect, время и границы данных
 
@@ -57,12 +76,12 @@ Calendar axis и durable history пока не обязательны.
 Runtime ring и локальная очередь переполнены; линия никогда не пересекает разрыв.
 Превышение memory budget обрезает старые данные с видимой пометкой.
 
-## 5. Декларативный документ и UI API
+## 5. Расширение документа: панели, индикаторы и drafts
 
-Строгие schema v1 DTO, стабильные IDs, стандартный layout. Реализовать loopback
-hello/get/replace/status и, если утверждено, шесть patch operations.
-Установку документа и локальные edits проводить одним CAS-путём в главном потоке.
-Сначала поддержать графики и индикаторы; editor widgets пока только меняют drafts.
+Расширить уже работающий replace-документ до нескольких графиков, панелей,
+индикаторов и editor widgets. Стандартный layout и общий CAS-путь для внешних
+и локальных edits. Editors пока только меняют drafts. Никаких физических команд
+из replace, redraw, drag или focus loss.
 
 Проверка: Clojure создаёт два графика/панель, затем отключается — GUI остаётся.
 Два клиента конфликтуют на base revision без частичных изменений.
@@ -73,6 +92,9 @@ hello/get/replace/status и, если утверждено, шесть patch ope
 
 Добавить typed bindings Reference, controller, output, Recorder и connection.
 Для power реализовать `output_observation` с readback timestamp и ясной подписью.
+Это отдельные маркеры подтверждённых дискретных значений `output.readback.value/at`,
+а не независимое непрерывное измерение физической мощности. Не соединять их
+наклонной линией, не дорисовывать значения по таймеру и не интерполировать пропуски.
 Recorder lifecycle events инвалидируют query, counters обновляются редкими queries.
 
 Проверка: второй независимый Runtime-клиент меняет setpoint/PID/Recorder,
@@ -82,21 +104,31 @@ Workbench узнаёт об этом сам. Мощность не запраш�
 ## 7. Операторские действия и неопределённые исходы
 
 Сначала Reference и controller lifecycle, затем PID configuration и Recorder.
-Ввести actual/draft/pending, подтверждения, captured revision/run/boot,
+Ввести actual/draft/pending, captured revision/run/boot,
 один mutation sequencer и limited RAM evidence. До first write сохранить exact
 request identity. Отдельная кнопка operation_status; автоматического resubmit нет.
+Обычное изменение уставки в прежнем режиме — явный Apply с проверкой revision,
+без дополнительного modal. Смена режима/темпа ramp, включение или настройка PID
+и другие потенциально опасные действия требуют дополнительного подтверждения.
+Pause/Safe — явные кнопки без задерживающего modal.
 
 Проверка: redraw, drag и focus loss не отправляют команд. Чужое изменение revision
-не перезаписывается старым draft. Одна confirm-активация даёт одну mutation.
+не перезаписывается старым draft. Один Apply/требуемое подтверждение даёт одну mutation.
 Обрыв на каждой границе accepted/terminal даёт корректный unknown. После reconnect
 актуальное значение не считается результатом потерянной команды.
 
-## 8. Явное ручное управление выходом
+## 8. Разовые ручные операции; длительный режим — только после отдельного решения
 
 Добавить acquire/renew/write/safe, только по собственному scope и Runtime profile.
 Показать owner, lease expiry, safe_pending/safe_confirmed и delivery evidence.
-Не включать автоматическое продление. Если short-lease UX не принят, оставить
-ручные output actions disabled и закончить обсуждение до объявления полной версии.
+Разовые операции пригодны для коротких проверок; ручное нажатие renew каждые
+2 секунды не считать пригодным UX длительного эксперимента.
+
+Предложение длительного режима зафиксировано в разделе 6.4 архитектуры:
+явный вход и согласие на видимое автопродление, новые плановые renew после
+подтверждённого успеха, выход через явный Safe, остановка при stale/ошибке/unknown.
+**Пока этот режим не реализовать.** Его подтверждение и отдельное задание —
+условия добавления, а не препятствие для раннего вертикального среза.
 
 Проверка: Clojure и Workbench имеют разные sessions; чужая lease блокирует
 write/renew/safe, PID и manual authority конфликтуют по Runtime.
@@ -104,12 +136,18 @@ Safe completed ещё не означает safe_confirmed. Истёкшее п�
 reacquire. После known admission долгого write явный safe не ждёт его terminal;
 при unknown admission новый seq не угадывается.
 Закрытие Workbench не посылает команды Runtime автоматически.
+После отдельного утверждения длительного режима дополнительно проверить idle-only
+renew, write дольше lease, неизвестный/поздний renew, отсутствие backlog/resubmit/
+reacquire, удаление document-панели, сворачивание, сон и Safe при pending admission.
 
 ## 9. Приёмка первой полноценной версии
 
 Выполнить двухклиентский сценарий из архитектуры на виртуальной печи:
 температура, output readback, Reference, PID, Recorder, ошибки, disconnect/reconnect
 и новый boot. Проверить выключенный Recorder и ограниченную RAM history.
+Typed patch не является условием этой приёмки: документ можно полностью заменять.
+Длительный manual mode не объявлять готовым без его отдельного утверждения,
+реализации и проверок; разовые manual operations оценивать отдельно.
 Прогнать protocol/model/action tests и короткий GUI smoke; `fmt`, `clippy`, тесты
 применительно к созданным исходникам.
 
@@ -117,13 +155,18 @@ reacquire. После known admission долгого write явный safe не 
 Никаких скрытых дополнительных listeners, Runtime dependencies или дискового
 recovery state. Все технические артефакты и test DB внутри sandbox.
 
-## Отдельные необязательные улучшения после этой версии
+## Отложенные и необязательные этапы
 
+- Typed `document.patch`: шесть сохранённых операций с общим CAS. Его можно взять
+  отдельным этапом **после работающего вертикального среза этапа 3**, необязательно
+  дожидаться всей версии; до этого не реализовать. Проверки transactional patch,
+  ссылок и удаления элементов добавляются вместе с операцией, не раньше.
 - Durable history через публичный API с явными gap/coverage, без чтения SQLite.
 - Optional UTC axis на time_anchor.
 - Min/max downsampling после измерений производительности.
 - Более удобная layout-настройка на штатных egui widgets.
 
 Для них нужен конкретный пользовательский сценарий. Multi-runtime, plugins,
-внешний Runtime gateway, автопродление manual leases и сложная recovery-система
-не являются автоматическим продолжением этого плана.
+внешний Runtime gateway и сложная recovery-система не являются автоматическим
+продолжением этого плана. Для предложенного автопродления manual leases нужна
+отдельная UX-договорённость из раздела 6.4, а не повторное ревью всей архитектуры.
